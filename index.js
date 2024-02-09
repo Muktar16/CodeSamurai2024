@@ -4,9 +4,12 @@ const connection = require('./db/connection');
 const User = require('./models/user');
 const Station = require('./models/station');
 const Train = require('./models/train');
+const moment = require('moment');
 
 const app = express();
 const PORT = process.env.PORT || 8000;
+
+let ticket = 1;
 
 app.use(bodyParser.json());
 
@@ -204,28 +207,107 @@ app.put('/api/wallets/:wallet_id', async(req, res) => {
 
 // tickets api
 
-// Endpoint to purchase a ticket
+// Function to calculate the cost of the ticket and optimal route
+async function calculateTicketCost(trains,stationFromId, stationToId, timeAfter) {
+  // Find all trains that connect the source and destination stations
+  // const trains = await Train.find({
+  //   'stops.station_id': { $in: [stationFromId, stationToId] },
+  // });
+  // Sort the trains based on their departure times
+  trains.sort(async (a, b) => {
+    const departureA = a.stops.find(stop => stop.station_id === stationFromId)?.departure_time;
+    const departureB = b.stops.find(stop => stop.station_id === stationFromId)?.departure_time;
+
+    // Calculate total cost for each train and compare
+    const costA = await calculateTotalCost(a, stationFromId, stationToId);
+    const costB = await calculateTotalCost(b, stationFromId, stationToId);
+
+    // Sort by departure time first, and if the same, by total cost
+    if (departureA.localeCompare(departureB) !== 0) {
+      return departureA.localeCompare(departureB);
+    } else {
+      return costA - costB;
+    }
+  });
+
+  console.log(JSON.stringify(trains, null, 2));
+
+  // Calculate the optimal route and total cost for the train with the minimum cost
+  const optimalTrain = trains[0];
+  const sourceIndex = optimalTrain.stops.findIndex(stop => stop.station_id === stationFromId);
+  const destinationIndex = optimalTrain.stops.findIndex(stop => stop.station_id === stationToId);
+  const route = optimalTrain.stops.slice(sourceIndex, destinationIndex + 1);
+  const totalCost = route.reduce((acc, stop) => acc + stop.fare, 0);
+
+  return { totalCost, route };
+}
+
+async function calculateTotalCost(train, stationFromId, stationToId) {
+  const sourceIndex = train.stops.findIndex(stop => stop.station_id === stationFromId);
+  const destinationIndex = train.stops.findIndex(stop => stop.station_id === stationToId);
+
+  if (sourceIndex !== -1 && destinationIndex !== -1 && sourceIndex <= destinationIndex) {
+    const stopsOnRoute = train.stops.slice(sourceIndex, destinationIndex + 1);
+    const totalCost = stopsOnRoute.reduce((acc, stop) => acc + stop.fare, 0);
+    return totalCost;
+  }
+
+  return -5; // Return Infinity for trains that don't cover the full route
+}
+
+
+// Function to generate a unique ticket ID
+function generateTicketId() {
+  return ticket++;
+}
+
+// API endpoint to purchase a ticket
 app.post('/api/tickets', async (req, res) => {
-  const walletId = parseInt(req.body.wallet_id);
-  const timeAfter = req.body.time_after;
-  const stationFromId = parseInt(req.body.station_from);
-  const stationToId = parseInt(req.body.station_to);
+  const { wallet_id, time_after, station_from, station_to } = req.body;
 
   try {
-    // Find the user with the given ID (assuming wallet_id is user_id)
-    const user = await User.findOne({ user_id: walletId });
+    // Find the user based on wallet_id
+    const user = await User.findOne({ user_id: wallet_id });
 
+    // Check if the user exists
     if (!user) {
-      return res.status(404).json({ message: `user with id: ${walletId} was not found` });
+      return res.status(404).json({ message: `User with id ${wallet_id} not found` });
     }
 
-    // Calculate the cost of the ticket
-    const { totalCost, route } = await calculateTicketCost(stationFromId, stationToId, timeAfter);
+    
+    const trains = await Train.find();
+    let selectedTrains = [];
+    trains.forEach((train) => {
+      const stops = train.stops;
+      const ll = stops.find(stop => stop.station_id === station_to);
+      console.log(ll);
+      if (ll!=undefined) {
+        
+        for (let i = 0; i < stops.length; i++) {
+          const departureTime = moment(`1970-01-01T${stops[i].departure_time}:00`, 'YYYY-MM-DDTHH:mm:ss');
+          const timeAfter = moment(`1970-01-01T${time_after}:00`, 'YYYY-MM-DDTHH:mm:ss');
+          console.log(departureTime,timeAfter,departureTime >timeAfter);
+          if (stops[i].station_id === station_from && departureTime > timeAfter) {
+            console.log("found");
+            selectedTrains.push(train);
+            break;
+          }
+        }
+      }
+    });
+    console.log(selectedTrains);
 
-    // Check if the user's balance is sufficient
+    if (selectedTrains.length === 0) {
+      return res.status(403).json({ message: `No available trains for station: ${station_from} to station: ${station_to}` });
+    }
+
+    // Calculate the cost and optimal route
+    const { totalCost, route } = await calculateTicketCost(selectedTrains,station_from, station_to, time_after);
+    console.log({ totalCost, route });
+    // Check if the user has sufficient balance
     if (user.balance < totalCost) {
       const shortageAmount = totalCost - user.balance;
-      return res.status(402).json({ message: `recharge amount: ${shortageAmount} to purchase the ticket` });
+      return res.status(402).json({ message: `Recharge amount: ${shortageAmount} to purchase the ticket` });
     }
 
     // Update the user's balance
@@ -233,24 +315,13 @@ app.post('/api/tickets', async (req, res) => {
     await user.save();
 
     // Generate a unique ticket ID
-    const ticketId = generateTicketId();
+    const ticket_id = generateTicketId();
 
-    // Create the ticket object
-    const ticket = new Ticket({
-      ticket_id: ticketId,
-      wallet_id: walletId,
-      balance: user.balance,
-      stations: route,
-    });
-
-    // Save the ticket to the database
-    await ticket.save();
-
-    // Respond with the ticket information
+    // Respond with the ticket details
     res.status(201).json({
-      ticket_id: ticketId,
+      ticket_id,
       balance: user.balance,
-      wallet_id: walletId,
+      wallet_id: user.user_id,
       stations: route,
     });
   } catch (error) {
@@ -258,48 +329,6 @@ app.post('/api/tickets', async (req, res) => {
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });
-
-// Function to calculate the cost of the ticket and optimal route
-async function calculateTicketCost(stationFromId, stationToId, timeAfter) {
-  // Your logic to calculate the optimal route and total cost goes here
-  // This is a placeholder implementation, you need to replace it with your actual logic
-
-  // For demonstration purposes, let's assume a simple route with a fixed cost
-  const route = [
-    { station_id: 1, train_id: 3, departure_time: '11:00', arrival_time: null },
-    { station_id: 3, train_id: 2, departure_time: '12:00', arrival_time: '11:55' },
-    { station_id: 5, train_id: 2, departure_time: null, arrival_time: '12:25' },
-  ];
-
-  // Calculate the total cost based on the fixed fare for this example
-  const totalCost = route.reduce((cost, station, index) => {
-    if (index > 0) {
-      // Add the fare for each consecutive pair of stations
-      cost += getFare(route[index - 1].station_id, station.station_id);
-    }
-    return cost;
-  }, 0);
-
-  return { totalCost, route };
-}
-
-// Function to get the fare between two stations (placeholder implementation)
-function getFare(stationFromId, stationToId) {
-  // Your logic to get the fare between two stations goes here
-  // This is a placeholder implementation, you need to replace it with your actual logic
-
-  // For demonstration purposes, let's assume a fixed fare
-  return 10;
-}
-
-// Function to generate a unique ticket ID
-function generateTicketId() {
-  // Your logic to generate a unique ticket ID goes here
-  // This is a placeholder implementation, you need to replace it with your actual logic
-
-  // For demonstration purposes, let's generate a random number as the ticket ID
-  return Math.floor(Math.random() * 1000);
-}
 
 
 
