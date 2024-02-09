@@ -4,12 +4,16 @@ services:
   node-app:
     build: .
     ports:
-      - "8000:3001"
+      - "8000:8000"
     environment:
       - MONGODB_URI=mongodb://mongo:27017/mydatabase
     depends_on:
       - mongo
-  mongo:
+  db:
     image: mongo
     ports:
       - "27017:27017"
+    volumes:
+      - db-data:/foo
+volumes:
+  db-data:
