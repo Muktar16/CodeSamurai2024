@@ -304,6 +304,7 @@ app.post('/api/tickets', async (req, res) => {
     // Calculate the cost and optimal route
     const { totalCost, route } = await calculateTicketCost(selectedTrains,station_from, station_to, time_after);
     console.log({ totalCost, route });
+    
     // Check if the user has sufficient balance
     if (user.balance < totalCost) {
       const shortageAmount = totalCost - user.balance;
